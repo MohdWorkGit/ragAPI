@@ -64,6 +64,7 @@ class QueryRequest(BaseModel):
     fileName: Optional[str] = None  # If provided, search only in this document
     search_mode: Optional[str] = "unified"  # "unified", "individual", or "hybrid"
     top_k: Optional[int] = 5  # Number of results to return
+    language: Optional[str] = None  # "arabic" or "english" for response language
 
 class RefreshRequest(BaseModel):
     fileName: Optional[str] = None  # If provided, refresh only this document
@@ -640,6 +641,56 @@ async def search_documents(request: QueryRequest):
 
     except Exception as e:
         logger.error(f"Search error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/ask_unified")
+async def ask_unified(request: QueryRequest):
+    """Ask the LLM a question using unified index across all documents"""
+    try:
+        if not unified_store:
+            raise HTTPException(status_code=503, detail="Unified index not available. Please refresh documents.")
+
+        logger.info(f"Unified query: {request.query}")
+
+        # Get QA chain with unified index
+        qa_chain = get_document_qa_chain(use_unified=True)
+
+        # Prepare query with language preference
+        query = request.query
+        if request.language and request.language.lower() == "arabic":
+            query = "جاوب بالعربية, " + query
+
+        # Generate response
+        result = qa_chain({"query": query})
+
+        # Extract source information with details
+        sources = []
+        source_files = set()
+        if 'source_documents' in result:
+            for doc in result['source_documents']:
+                source_file = doc.metadata.get('source_file', 'unknown')
+                source_files.add(source_file)
+                sources.append({
+                    'file': source_file,
+                    'content_preview': doc.page_content[:200],
+                    'chunk_index': doc.metadata.get('chunk_index', -1),
+                    'score': doc.metadata.get('score', 'N/A')
+                })
+
+        return {
+            "response": result['result'],
+            "query": request.query,
+            "source": "unified_index",
+            "sources_used": sources,
+            "unique_source_files": list(source_files),
+            "total_sources": len(sources),
+            "language": request.language or "default",
+            "timestamp": datetime.now().isoformat(),
+            "status": "success"
+        }
+
+    except Exception as e:
+        logger.error(f"Unified query error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/query")
