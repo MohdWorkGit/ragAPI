@@ -305,13 +305,72 @@ def load_document_embeddings(filename: str):
 # ============================================================================
 # Unified Index Functions
 # ============================================================================
-def build_unified_index():
+def needs_unified_rebuild() -> bool:
+    """
+    Check if unified index needs to be rebuilt.
+
+    Returns True if:
+    - Unified index doesn't exist
+    - Number of documents changed
+    - Document list changed (files added/removed)
+    - Any individual document was updated after unified index creation
+
+    Returns False if unified index is up to date with all current documents.
+    """
+    # If unified index doesn't exist, need to build
+    if not os.path.exists(UNIFIED_EMBEDDINGS_PATH) or not os.path.exists(UNIFIED_METADATA_PATH):
+        logger.info("Unified index not found - rebuild needed")
+        return True
+
+    # Load existing unified metadata
+    try:
+        with open(UNIFIED_METADATA_PATH, 'r') as f:
+            existing_unified_metadata = json.load(f)
+    except Exception as e:
+        logger.warning(f"Error loading unified metadata: {e} - rebuild needed")
+        return True
+
+    # Check if number of documents changed
+    if existing_unified_metadata.get('total_documents', 0) != len(document_stores):
+        logger.info(f"Document count changed ({existing_unified_metadata.get('total_documents', 0)} -> {len(document_stores)}) - rebuild needed")
+        return True
+
+    # Check if document list changed
+    existing_files = set(existing_unified_metadata.get('source_files', []))
+    current_files = set(document_stores.keys())
+
+    if existing_files != current_files:
+        logger.info(f"Document list changed - rebuild needed")
+        logger.info(f"  Added: {current_files - existing_files}")
+        logger.info(f"  Removed: {existing_files - current_files}")
+        return True
+
+    # Check if any individual document was updated after unified index creation
+    unified_created_at = existing_unified_metadata.get('created_at', '')
+
+    for filename, metadata in document_metadata.items():
+        doc_created_at = metadata.get('created_at', '')
+
+        # If document was created/updated after unified index, rebuild needed
+        if doc_created_at > unified_created_at:
+            logger.info(f"Document {filename} was updated after unified index - rebuild needed")
+            return True
+
+    logger.info("Unified index is up to date - no rebuild needed")
+    return False
+
+def build_unified_index(force_rebuild: bool = False):
     """Build a unified FAISS index from all individual document stores"""
     global unified_store, unified_metadata
 
     if not document_stores:
         logger.warning("No documents available to build unified index")
         return False
+
+    # Check if rebuild is needed (unless forced)
+    if not force_rebuild and not needs_unified_rebuild():
+        logger.info("Using existing unified index (no changes detected)")
+        return load_unified_index()
 
     try:
         logger.info("Building unified index from all documents...")
@@ -405,8 +464,8 @@ def scan_and_process_documents():
 
     logger.info(f"Document processing complete: {processed_count} processed, {failed_count} failed")
 
-    # Build unified index after processing all documents
-    if processed_count > 0:
+    # Build or load unified index (will automatically check if rebuild is needed)
+    if document_stores:
         build_unified_index()
 
 # ============================================================================
@@ -926,9 +985,9 @@ async def refresh_documents(request: RefreshRequest):
 
             success = create_document_embeddings(file_path, force_refresh=True)
 
-            # Rebuild unified index if requested
+            # Rebuild unified index if requested (force rebuild since document was updated)
             if success and request.rebuild_unified:
-                build_unified_index()
+                build_unified_index(force_rebuild=True)
 
             return {
                 "message": f"Document {request.fileName} {'refreshed successfully' if success else 'failed to refresh'}",
@@ -1001,11 +1060,11 @@ def initialize_system():
         os.makedirs(METADATA_FOLDER, exist_ok=True)
         os.makedirs(SUMMARY_FOLDER, exist_ok=True)
 
-        # Load existing unified index if available
-        load_unified_index()
-
-        # Scan and process all documents
+        # Scan and process all documents (will load existing embeddings)
         scan_and_process_documents()
+
+        # build_unified_index is called within scan_and_process_documents
+        # It will automatically check if rebuild is needed and load existing index if up to date
 
         logger.info(f"System initialized successfully! Loaded {len(document_stores)} documents")
         if unified_store:
