@@ -543,7 +543,7 @@ async def chat_with_document(request: ChatRequest):
             "response": result['result'],
             "fileName": request.fileName,
             "timestamp": request.timestamp,
-            "sources": sources,
+            # "sources": sources,
             "status": "success"
         }
 
