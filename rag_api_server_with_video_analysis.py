@@ -178,26 +178,26 @@ def extract_key_visual_features(frames: List[Image.Image]) -> str:
 
     return " ".join(visual_descriptions)
 
-def process_video_file(video_path: str, num_frames: int = 10, output_language: str = "arabic") -> Dict:
+def extract_video_content_as_text(video_path: str, num_frames: int = 10) -> Tuple[str, Dict]:
     """
-    Process a video file: extract audio, transcribe, analyze frames, and generate summary
+    Extract video content as text for embeddings (audio transcript + visual descriptions)
+    Returns: (combined_text, metadata_dict)
     """
+    audio_path = None
     try:
         # Extract audio with ffmpeg
         audio_path = video_path + ".wav"
         subprocess.run([
             "ffmpeg", "-i", video_path, "-ar", "16000", "-ac", "1", audio_path, "-y"
-        ], check=True, capture_output=True)
+        ], check=True, capture_output=True, stderr=subprocess.DEVNULL)
 
-        # 1. AUDIO ANALYSIS
-        # Transcribe with Whisper
+        # 1. AUDIO ANALYSIS - Transcribe with Whisper
         result = asr_model.transcribe(audio_path, task="transcribe")
         transcript = result["text"]
         detected_lang = result["language"]
-        logger.info(f"Audio transcribed: {transcript[:100]}...")
+        logger.info(f"Audio transcribed from {os.path.basename(video_path)}: {len(transcript)} characters")
 
-        # 2. VIDEO/IMAGE ANALYSIS
-        # Extract frames from video
+        # 2. VIDEO/IMAGE ANALYSIS - Extract frames
         frames = extract_frames(video_path, num_frames=num_frames)
 
         # Generate frame captions
@@ -206,14 +206,51 @@ def process_video_file(video_path: str, num_frames: int = 10, output_language: s
         # Get visual summary
         visual_summary = extract_key_visual_features(frames)
 
-        # 3. COMBINE AUDIO AND VISUAL INFORMATION
-        combined_text = f"""
-        Audio Content: {transcript}
+        # 3. COMBINE AUDIO AND VISUAL INFORMATION INTO TEXT
+        combined_text = f"""Video Content Analysis:
 
-        Visual Content: {visual_summary}
-        """
+Audio Transcript:
+{transcript}
 
-        # 4. GENERATE SUMMARY IN TARGET LANGUAGE
+Visual Analysis:
+{visual_summary}
+
+Detailed Frame Descriptions:
+{chr(10).join(frame_captions)}
+"""
+
+        # Metadata for this video
+        metadata = {
+            "detected_language": detected_lang,
+            "num_frames_analyzed": len(frames),
+            "transcript_length": len(transcript),
+            "has_audio": len(transcript) > 0,
+            "has_visual": len(frames) > 0
+        }
+
+        # Clean up audio file
+        if audio_path and os.path.exists(audio_path):
+            os.remove(audio_path)
+
+        return combined_text, metadata
+
+    except Exception as e:
+        logger.error(f"Error extracting video content: {e}")
+        # Clean up
+        if audio_path and os.path.exists(audio_path):
+            os.remove(audio_path)
+        raise
+
+def process_video_file(video_path: str, num_frames: int = 10, output_language: str = "arabic") -> Dict:
+    """
+    Process a video file: extract audio, transcribe, analyze frames, and generate summary
+    (Used for direct video analysis endpoint)
+    """
+    try:
+        # Extract content as text
+        combined_text, extraction_metadata = extract_video_content_as_text(video_path, num_frames)
+
+        # Generate summary in target language using mBART
         if output_language.lower() == "arabic":
             forced_bos_token_id = tokenizer.lang_code_to_id["ar_AR"]
         else:
@@ -239,26 +276,18 @@ def process_video_file(video_path: str, num_frames: int = 10, output_language: s
 
         summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
 
-        # Clean up audio file
-        if os.path.exists(audio_path):
-            os.remove(audio_path)
-
         return {
             "summary": summary,
-            "audio_transcript": transcript,
-            "visual_descriptions": frame_captions,
-            "visual_summary": visual_summary,
-            "detected_language": detected_lang,
-            "num_frames_analyzed": len(frames),
+            "audio_transcript": combined_text.split("Visual Analysis:")[0].replace("Video Content Analysis:", "").replace("Audio Transcript:", "").strip(),
+            "visual_summary": extraction_metadata,
+            "detected_language": extraction_metadata["detected_language"],
+            "num_frames_analyzed": extraction_metadata["num_frames_analyzed"],
             "device": DEVICE,
             "status": "success"
         }
 
     except Exception as e:
         logger.error(f"Error processing video: {e}")
-        # Clean up
-        if os.path.exists(audio_path):
-            os.remove(audio_path)
         raise
 
 # ============================================================================
@@ -438,6 +467,123 @@ def load_document_embeddings(filename: str):
         logger.error(f"Error loading embeddings for {filename}: {e}")
         return False
 
+# ============================================================================
+# Video Embeddings Functions
+# ============================================================================
+def create_video_embeddings(file_path: str, force_refresh: bool = False, num_frames: int = 10):
+    """Create and save embeddings for a video file"""
+    filename = os.path.basename(file_path)
+    file_hash = get_file_hash(file_path)
+
+    metadata_path = os.path.join(METADATA_FOLDER, f"{filename}.metadata.json")
+    embedding_path = os.path.join(EMBEDDINGS_FOLDER, f"{filename}.faiss")
+
+    # Check if embeddings already exist and are up to date
+    if not force_refresh and os.path.exists(metadata_path) and os.path.exists(embedding_path):
+        with open(metadata_path, 'r') as f:
+            existing_metadata = json.load(f)
+
+        if existing_metadata.get('file_hash') == file_hash:
+            logger.info(f"Embeddings for video {filename} are up to date, loading from cache")
+            return load_document_embeddings(filename)  # Reuse same loading function
+
+    # Create new embeddings
+    logger.info(f"Creating embeddings for video: {filename}")
+
+    try:
+        # Extract video content as text
+        video_text, video_metadata = extract_video_content_as_text(file_path, num_frames)
+
+        # Create a Document object from the video content
+        doc = Document(
+            page_content=video_text,
+            metadata={
+                'source_file': filename,
+                'file_path': file_path,
+                'content_type': 'video',
+                **video_metadata
+            }
+        )
+
+        # Split the video content into chunks
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            separators=["\n\n", "\n", ". ", " ", ""]
+        )
+        chunks = splitter.split_documents([doc])
+
+        if not chunks:
+            logger.warning(f"No chunks created for video {filename}")
+            return False
+
+        # Add chunk index to metadata
+        for i, chunk in enumerate(chunks):
+            chunk.metadata['chunk_index'] = i
+            chunk.metadata['total_chunks'] = len(chunks)
+
+        # Create FAISS vector store
+        db = FAISS.from_documents(chunks, embeddings_model)
+
+        # Save the vector store
+        os.makedirs(EMBEDDINGS_FOLDER, exist_ok=True)
+        db.save_local(embedding_path)
+
+        # Save metadata
+        metadata = {
+            'filename': filename,
+            'file_path': file_path,
+            'file_hash': file_hash,
+            'chunk_count': len(chunks),
+            'created_at': datetime.now().isoformat(),
+            'model_used': EMBEDDING_MODEL,
+            'content_type': 'video',
+            'video_metadata': video_metadata
+        }
+
+        os.makedirs(METADATA_FOLDER, exist_ok=True)
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+
+        # Store in memory
+        document_stores[filename] = db
+        document_metadata[filename] = metadata
+
+        logger.info(f"Successfully created embeddings for video {filename} with {len(chunks)} chunks")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error creating embeddings for video {filename}: {e}")
+        return False
+
+def scan_and_process_videos():
+    """Scan videos folder and process all video files"""
+    if not os.path.exists(Videos_FOLDER):
+        os.makedirs(Videos_FOLDER)
+        logger.info(f"Created {Videos_FOLDER} directory")
+        return
+
+    # Video file extensions
+    video_extensions = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v', '.3gp', '.ogv', '.ogg')
+
+    processed_count = 0
+    failed_count = 0
+
+    for filename in os.listdir(Videos_FOLDER):
+        file_path = os.path.join(Videos_FOLDER, filename)
+
+        if os.path.isfile(file_path) and filename.lower().endswith(video_extensions):
+            try:
+                if create_video_embeddings(file_path):
+                    processed_count += 1
+                else:
+                    failed_count += 1
+            except Exception as e:
+                logger.error(f"Failed to process video {filename}: {e}")
+                failed_count += 1
+
+    logger.info(f"Video processing complete: {processed_count} processed, {failed_count} failed")
+
 def needs_unified_rebuild() -> bool:
     """Check if unified index needs to be rebuilt"""
     if not os.path.exists(UNIFIED_EMBEDDINGS_PATH) or not os.path.exists(UNIFIED_METADATA_PATH):
@@ -569,8 +715,20 @@ def scan_and_process_documents():
 
     logger.info(f"Document processing complete: {processed_count} processed, {failed_count} failed")
 
+def scan_and_process_all_content():
+    """Scan both docs and videos folders and process all content"""
+    logger.info("Scanning and processing all content (documents and videos)...")
+
+    # Process documents
+    scan_and_process_documents()
+
+    # Process videos
+    scan_and_process_videos()
+
+    # Build unified index with both documents and videos
     if document_stores:
         build_unified_index()
+        logger.info(f"Unified index includes {len(document_stores)} items (documents + videos)")
 
 def get_document_qa_chain(filename: str = None, use_unified: bool = False):
     """Get QA chain for a specific document or unified index"""
@@ -683,13 +841,20 @@ async def analyze_existing_video(request: VideoAnalysisRequest):
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
+    doc_count = sum(1 for m in document_metadata.values() if m.get('content_type') != 'video')
+    video_count = sum(1 for m in document_metadata.values() if m.get('content_type') == 'video')
+
     return {
         "status": "OK",
         "message": "Enhanced RAG API with Video Analysis is running",
         "rag_model": MODEL_NAME,
         "embedding_model": EMBEDDING_MODEL,
         "video_analysis_available": asr_model is not None,
-        "documents_loaded": len(document_stores),
+        "content_loaded": {
+            "documents": doc_count,
+            "videos": video_count,
+            "total": len(document_stores)
+        },
         "unified_index_ready": unified_store is not None,
         "device": DEVICE,
         "timestamp": datetime.now().isoformat()
@@ -823,22 +988,34 @@ async def ask_unified(request: QueryRequest):
 
 @app.get("/api/documents")
 async def list_documents():
-    """List all available documents with metadata"""
+    """List all available documents and videos with metadata"""
     documents = []
+    videos = []
 
     for filename, metadata in document_metadata.items():
-        doc_info = {
+        item_info = {
             "filename": filename,
             "chunk_count": metadata.get("chunk_count", 0),
             "created_at": metadata.get("created_at"),
             "file_path": metadata.get("file_path"),
-            "available": filename in document_stores
+            "available": filename in document_stores,
+            "content_type": metadata.get("content_type", "document")
         }
-        documents.append(doc_info)
+
+        # Separate documents and videos
+        if metadata.get("content_type") == "video":
+            # Add video-specific metadata
+            item_info["video_metadata"] = metadata.get("video_metadata", {})
+            videos.append(item_info)
+        else:
+            documents.append(item_info)
 
     return {
         "documents": documents,
-        "total_count": len(documents),
+        "videos": videos,
+        "total_documents": len(documents),
+        "total_videos": len(videos),
+        "total_items": len(documents) + len(videos),
         "unified_index_ready": unified_store is not None,
         "unified_chunks": unified_metadata.get('total_chunks', 0) if unified_metadata else 0,
         "timestamp": datetime.now().isoformat()
@@ -965,29 +1142,50 @@ async def get_video(filename: str):
 
 @app.post("/api/refresh")
 async def refresh_documents(request: RefreshRequest):
-    """Refresh embeddings for all documents or a specific document"""
+    """Refresh embeddings for all documents/videos or a specific file"""
     try:
         if request.fileName:
+            # Try to find the file in either docs or videos folder
             file_path = os.path.join(DOC_FOLDER, request.fileName)
-            if not os.path.exists(file_path):
-                raise HTTPException(status_code=404, detail=f"File {request.fileName} not found")
+            is_video = False
 
-            success = create_document_embeddings(file_path, force_refresh=True)
+            if not os.path.exists(file_path):
+                # Try videos folder
+                file_path = os.path.join(Videos_FOLDER, request.fileName)
+                is_video = True
+
+                if not os.path.exists(file_path):
+                    raise HTTPException(status_code=404, detail=f"File {request.fileName} not found in docs or videos folder")
+
+            # Refresh the file
+            if is_video:
+                success = create_video_embeddings(file_path, force_refresh=True)
+            else:
+                success = create_document_embeddings(file_path, force_refresh=True)
 
             if success and request.rebuild_unified:
                 build_unified_index(force_rebuild=True)
 
+            content_type = "video" if is_video else "document"
             return {
-                "message": f"Document {request.fileName} {'refreshed successfully' if success else 'failed to refresh'}",
+                "message": f"{content_type.capitalize()} {request.fileName} {'refreshed successfully' if success else 'failed to refresh'}",
                 "success": success,
+                "content_type": content_type,
                 "unified_rebuilt": request.rebuild_unified and success,
                 "timestamp": datetime.now().isoformat()
             }
         else:
-            scan_and_process_documents()
+            # Refresh all content (documents and videos)
+            scan_and_process_all_content()
+
+            doc_count = sum(1 for m in document_metadata.values() if m.get('content_type') != 'video')
+            video_count = sum(1 for m in document_metadata.values() if m.get('content_type') == 'video')
+
             return {
-                "message": "All documents refreshed",
-                "documents_processed": len(document_stores),
+                "message": "All content refreshed",
+                "documents_processed": doc_count,
+                "videos_processed": video_count,
+                "total_items": len(document_stores),
                 "unified_index_ready": unified_store is not None,
                 "timestamp": datetime.now().isoformat()
             }
@@ -999,16 +1197,26 @@ async def refresh_documents(request: RefreshRequest):
 @app.get("/api/status")
 async def get_system_status():
     """Get detailed system status"""
+    # Separate documents and videos
+    doc_items = [f for f, m in document_metadata.items() if m.get('content_type') != 'video']
+    video_items = [f for f, m in document_metadata.items() if m.get('content_type') == 'video']
+
     return {
         "rag_model": MODEL_NAME,
         "embedding_model": EMBEDDING_MODEL,
-        "documents_loaded": len(document_stores),
-        "available_documents": list(document_stores.keys()),
+        "content_loaded": {
+            "total_items": len(document_stores),
+            "documents": len(doc_items),
+            "videos": len(video_items),
+            "document_list": doc_items,
+            "video_list": video_items
+        },
         "unified_index": {
             "ready": unified_store is not None,
             "total_chunks": unified_metadata.get('total_chunks', 0) if unified_metadata else 0,
             "source_files": unified_metadata.get('source_files', []) if unified_metadata else [],
-            "created_at": unified_metadata.get('created_at') if unified_metadata else None
+            "created_at": unified_metadata.get('created_at') if unified_metadata else None,
+            "includes_videos": len(video_items) > 0
         },
         "video_analysis": {
             "available": asr_model is not None,
@@ -1017,7 +1225,8 @@ async def get_system_status():
                 "whisper": asr_model is not None,
                 "blip": blip_model is not None,
                 "mbart": summariser_model is not None
-            }
+            },
+            "videos_in_rag": len(video_items)
         },
         "folders": {
             "docs": DOC_FOLDER,
@@ -1034,7 +1243,7 @@ async def get_system_status():
 # System Initialization
 # ============================================================================
 def initialize_rag_system():
-    """Initialize the RAG document processing system"""
+    """Initialize the RAG document and video processing system"""
     global embeddings_model
 
     try:
@@ -1054,9 +1263,14 @@ def initialize_rag_system():
         os.makedirs(METADATA_FOLDER, exist_ok=True)
         os.makedirs(SUMMARY_FOLDER, exist_ok=True)
 
-        scan_and_process_documents()
+        # Scan and process all content (documents + videos)
+        scan_and_process_all_content()
 
-        logger.info(f"RAG system initialized! Loaded {len(document_stores)} documents")
+        # Count documents vs videos
+        doc_count = sum(1 for m in document_metadata.values() if m.get('content_type') != 'video')
+        video_count = sum(1 for m in document_metadata.values() if m.get('content_type') == 'video')
+
+        logger.info(f"RAG system initialized! Loaded {doc_count} documents and {video_count} videos")
         if unified_store:
             logger.info(f"Unified index ready with {unified_metadata.get('total_chunks', 0)} chunks")
 
@@ -1129,12 +1343,21 @@ if __name__ == "__main__":
     print("="*80)
     print("✨ Features:")
     print("  - Document RAG with unified search")
-    print("  - Video upload and analysis")
+    print("  - Video RAG: Chat with video content (audio + visual)")
+    print("  - Videos automatically processed for embeddings")
+    print("  - Unified index includes both documents and videos")
     print("  - Audio transcription (Whisper)")
-    print("  - Visual analysis (BLIP)")
+    print("  - Visual frame analysis (BLIP)")
     print("  - Multi-modal summarization (mBART)")
-    print("  - Video streaming support")
+    print("  - Video streaming and file serving")
     print("  - Arabic language support")
+    print("="*80)
+    print("📖 Usage:")
+    print("  1. Add documents to 'docs' folder")
+    print("  2. Add videos to 'videos' folder")
+    print("  3. Server automatically creates embeddings on startup")
+    print("  4. Chat with documents/videos using /api/chat endpoint")
+    print("  5. Use /api/ask_unified for cross-content queries")
     print("="*80)
 
     uvicorn.run(
