@@ -1,0 +1,4 @@
+pymupdf>=1.23.0
+spacy>=3.7.0
+transformers>=4.35.0
+torch>=2.1.0

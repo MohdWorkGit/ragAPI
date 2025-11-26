@@ -13,6 +13,29 @@ import logging
 from difflib import SequenceMatcher
 import hashlib
 
+# Advanced extraction libraries
+try:
+    import pymupdf  # PyMuPDF for PDF block extraction
+    PYMUPDF_AVAILABLE = True
+except ImportError:
+    PYMUPDF_AVAILABLE = False
+    logging.warning("PyMuPDF not available. Install with: pip install pymupdf")
+
+try:
+    import spacy
+    SPACY_AVAILABLE = True
+    # Try to load the NER model
+    try:
+        nlp = spacy.load("en_core_web_sm")
+    except OSError:
+        logging.warning("spaCy model not found. Download with: python -m spacy download en_core_web_sm")
+        nlp = None
+        SPACY_AVAILABLE = False
+except ImportError:
+    SPACY_AVAILABLE = False
+    nlp = None
+    logging.warning("spaCy not available. Install with: pip install spacy")
+
 logger = logging.getLogger(__name__)
 
 # Configuration
@@ -117,6 +140,229 @@ class WriterManager:
             return best_match
 
         return None
+
+    def extract_blocks_from_pdf(self, pdf_path: str) -> List[Dict]:
+        """
+        Extract text blocks from PDF with layout information using PyMuPDF
+        Returns list of blocks with text, position, and font information
+        """
+        if not PYMUPDF_AVAILABLE:
+            logger.warning("PyMuPDF not available. Falling back to basic text extraction.")
+            return []
+
+        blocks = []
+        try:
+            doc = pymupdf.open(pdf_path)
+            for page_num, page in enumerate(doc):
+                # Get text blocks with position and font info
+                text_blocks = page.get_text("dict")["blocks"]
+
+                for block in text_blocks:
+                    if "lines" in block:  # Text block
+                        block_text = ""
+                        font_sizes = []
+
+                        for line in block["lines"]:
+                            for span in line["spans"]:
+                                block_text += span["text"] + " "
+                                font_sizes.append(span["size"])
+
+                        # Calculate average font size for this block
+                        avg_font_size = sum(font_sizes) / len(font_sizes) if font_sizes else 0
+
+                        blocks.append({
+                            "text": block_text.strip(),
+                            "bbox": block["bbox"],  # Bounding box (x0, y0, x1, y1)
+                            "page": page_num,
+                            "font_size": avg_font_size,
+                            "type": "text"
+                        })
+
+            doc.close()
+            logger.info(f"Extracted {len(blocks)} blocks from PDF: {pdf_path}")
+
+        except Exception as e:
+            logger.error(f"Error extracting blocks from PDF {pdf_path}: {e}")
+
+        return blocks
+
+    def identify_headline_blocks(self, blocks: List[Dict]) -> List[Dict]:
+        """
+        Identify blocks that are likely headlines based on font size and position
+        Headlines typically have larger font sizes and appear at the top of pages/sections
+        """
+        if not blocks:
+            return []
+
+        # Calculate median font size
+        font_sizes = [b["font_size"] for b in blocks if b.get("font_size", 0) > 0]
+        if not font_sizes:
+            return []
+
+        median_font = sorted(font_sizes)[len(font_sizes) // 2]
+
+        # Identify headline blocks (font size > 1.2x median)
+        headline_blocks = []
+        for block in blocks:
+            font_size = block.get("font_size", 0)
+            if font_size > median_font * 1.2:
+                block["is_headline"] = True
+                headline_blocks.append(block)
+
+        logger.info(f"Identified {len(headline_blocks)} headline blocks")
+        return headline_blocks
+
+    def extract_byline_patterns(self, blocks: List[Dict]) -> List[str]:
+        """
+        Extract journalist names from byline patterns near headlines
+        Bylines typically appear right after headlines
+        """
+        writers = set()
+
+        # Common byline patterns
+        byline_patterns = [
+            r'(?:by|BY)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)',
+            r'(?:written by|Written By|WRITTEN BY)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)',
+            r'(?:story by|Story By|STORY BY)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)',
+            r'(?:report by|Report By|REPORT BY)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)',
+            r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)$',  # Standalone name on line
+            # Arabic bylines
+            r'(?:بقلم|تقرير|خبر)\s*[:：]?\s*([ء-ي\s]+)',
+        ]
+
+        # Sort blocks by page and vertical position
+        sorted_blocks = sorted(blocks, key=lambda b: (b.get("page", 0), b.get("bbox", [0, 0, 0, 0])[1]))
+
+        # Check blocks near headlines
+        for i, block in enumerate(sorted_blocks):
+            # Check if this block or nearby blocks contain bylines
+            text = block.get("text", "")
+
+            # Check if previous block was a headline
+            is_near_headline = False
+            if i > 0 and sorted_blocks[i-1].get("is_headline", False):
+                is_near_headline = True
+
+            # Apply byline patterns
+            for pattern in byline_patterns:
+                matches = re.finditer(pattern, text, re.UNICODE | re.MULTILINE)
+                for match in matches:
+                    writer_name = match.group(1).strip()
+
+                    # Filter criteria
+                    if len(writer_name) > 3 and len(writer_name.split()) >= 2:
+                        # Give higher weight to names near headlines
+                        if is_near_headline:
+                            writers.add(writer_name)
+                            logger.info(f"Found byline near headline: {writer_name}")
+                        else:
+                            # Still add but with lower confidence
+                            if not writer_name.isupper():  # Skip all-caps (likely not names)
+                                writers.add(writer_name)
+
+        return list(writers)
+
+    def extract_names_with_ner(self, blocks: List[Dict], near_headlines_only: bool = True) -> List[str]:
+        """
+        Use NER (Named Entity Recognition) to detect person names in blocks
+        Focuses on blocks near headlines for better accuracy
+        """
+        if not SPACY_AVAILABLE or nlp is None:
+            logger.warning("spaCy NER not available. Skipping NER-based extraction.")
+            return []
+
+        writers = set()
+
+        # Filter to headline-adjacent blocks if requested
+        target_blocks = []
+        if near_headlines_only:
+            sorted_blocks = sorted(blocks, key=lambda b: (b.get("page", 0), b.get("bbox", [0, 0, 0, 0])[1]))
+            for i, block in enumerate(sorted_blocks):
+                # Include headlines and blocks immediately after
+                if block.get("is_headline", False) or (i > 0 and sorted_blocks[i-1].get("is_headline", False)):
+                    target_blocks.append(block)
+        else:
+            target_blocks = blocks
+
+        # Run NER on target blocks
+        for block in target_blocks:
+            text = block.get("text", "")
+            if not text.strip():
+                continue
+
+            try:
+                doc = nlp(text)
+
+                # Extract PERSON entities
+                for ent in doc.ents:
+                    if ent.label_ == "PERSON":
+                        name = ent.text.strip()
+
+                        # Filter criteria
+                        # - Must have at least 2 words (first + last name)
+                        # - Not all uppercase (likely organization)
+                        # - Length > 3 characters
+                        words = name.split()
+                        if len(words) >= 2 and len(name) > 3 and not name.isupper():
+                            writers.add(name)
+                            logger.info(f"NER found person: {name}")
+
+            except Exception as e:
+                logger.error(f"Error in NER processing: {e}")
+
+        return list(writers)
+
+    def extract_writer_names_from_pdf(self, pdf_path: str) -> List[str]:
+        """
+        Enhanced PDF writer extraction using PyMuPDF and NER
+        Pipeline:
+        1. Extract blocks with PyMuPDF
+        2. Identify headline blocks
+        3. Search for byline patterns near headlines
+        4. Run NER on blocks near headlines
+        5. Combine and deduplicate results
+        """
+        all_writers = set()
+
+        # Step 1: Extract blocks from PDF
+        blocks = self.extract_blocks_from_pdf(pdf_path)
+        if not blocks:
+            logger.warning(f"No blocks extracted from {pdf_path}. Trying fallback method.")
+            # Fallback to basic text extraction
+            try:
+                if PYMUPDF_AVAILABLE:
+                    doc = pymupdf.open(pdf_path)
+                    text = ""
+                    for page in doc:
+                        text += page.get_text()
+                    doc.close()
+                    return self.extract_writer_names(text)
+            except Exception as e:
+                logger.error(f"Fallback extraction failed: {e}")
+            return []
+
+        # Step 2: Identify headline blocks
+        headline_blocks = self.identify_headline_blocks(blocks)
+
+        # Step 3: Extract byline patterns
+        byline_writers = self.extract_byline_patterns(blocks)
+        all_writers.update(byline_writers)
+        logger.info(f"Byline extraction found: {byline_writers}")
+
+        # Step 4: Run NER on blocks near headlines
+        ner_writers = self.extract_names_with_ner(blocks, near_headlines_only=True)
+        all_writers.update(ner_writers)
+        logger.info(f"NER extraction found: {ner_writers}")
+
+        # Step 5: Fallback to pattern matching on full text
+        full_text = " ".join([b.get("text", "") for b in blocks])
+        pattern_writers = self.extract_writer_names(full_text)
+        all_writers.update(pattern_writers)
+
+        result = list(all_writers)
+        logger.info(f"Total writers extracted from PDF: {len(result)} - {result}")
+
+        return result
 
     def extract_writer_names(self, text: str) -> List[str]:
         """
@@ -350,21 +596,44 @@ Provide a concise summary in JSON format with keys: achievements, affiliations, 
 
         return summary
 
-    def process_document_for_writers(self, document_file: str, text_content: str, llm=None) -> List[str]:
+    def process_document_for_writers(self, document_file: str, text_content: str = None,
+                                     document_path: str = None, llm=None) -> List[str]:
         """
         Process a document to extract and track writers
-        Returns list of writer_ids found in the document
+        Uses enhanced PDF extraction for PDF files, pattern matching for text
+
+        Args:
+            document_file: Name/identifier of the document
+            text_content: Plain text content (optional if document_path is provided)
+            document_path: Full path to document file (for PDF processing)
+            llm: Optional LLM for enhanced extraction
+
+        Returns:
+            List of writer_ids found in the document
         """
         logger.info(f"Processing document for writers: {document_file}")
 
-        # Extract writer names
-        writer_names = self.extract_writer_names(text_content)
+        writer_names = []
+
+        # Use enhanced PDF extraction if it's a PDF file
+        if document_path and document_path.lower().endswith('.pdf'):
+            logger.info(f"Using enhanced PDF extraction for: {document_path}")
+            writer_names = self.extract_writer_names_from_pdf(document_path)
+        elif text_content:
+            # Fallback to text-based extraction
+            writer_names = self.extract_writer_names(text_content)
+        else:
+            logger.error(f"No text_content or document_path provided for {document_file}")
+            return []
+
         logger.info(f"Found {len(writer_names)} potential writers: {writer_names}")
 
         writer_ids = []
         for name in writer_names:
             try:
-                writer_id = self.add_or_update_writer(name, document_file, text_content, llm=llm)
+                # Use text_content if available, otherwise empty string
+                content = text_content if text_content else ""
+                writer_id = self.add_or_update_writer(name, document_file, content, llm=llm)
                 writer_ids.append(writer_id)
             except Exception as e:
                 logger.error(f"Error processing writer {name}: {e}")
