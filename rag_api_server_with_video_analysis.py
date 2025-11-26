@@ -40,6 +40,9 @@ import whisper
 import cv2
 from PIL import Image
 
+# Import writer manager
+from writer_manager import get_writer_manager
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -415,6 +418,17 @@ def create_document_embeddings(file_path: str, force_refresh: bool = False):
         chunk.metadata['chunk_index'] = i
         chunk.metadata['total_chunks'] = len(chunks)
 
+    # Extract writers from document
+    try:
+        # Get full text content from all chunks
+        full_text = "\n".join([doc.page_content for doc in docs])
+        writer_manager = get_writer_manager()
+        writer_ids = writer_manager.process_document_for_writers(filename, full_text)
+        logger.info(f"Extracted {len(writer_ids)} writers from {filename}")
+    except Exception as e:
+        logger.error(f"Error extracting writers from {filename}: {e}")
+        writer_ids = []
+
     try:
         db = FAISS.from_documents(chunks, embeddings_model)
         os.makedirs(EMBEDDINGS_FOLDER, exist_ok=True)
@@ -426,7 +440,8 @@ def create_document_embeddings(file_path: str, force_refresh: bool = False):
             'file_hash': file_hash,
             'chunk_count': len(chunks),
             'created_at': datetime.now().isoformat(),
-            'model_used': EMBEDDING_MODEL
+            'model_used': EMBEDDING_MODEL,
+            'writers_extracted': writer_ids  # Add writer IDs to metadata
         }
 
         os.makedirs(METADATA_FOLDER, exist_ok=True)
@@ -522,6 +537,15 @@ def create_video_embeddings(file_path: str, force_refresh: bool = False, num_fra
             chunk.metadata['chunk_index'] = i
             chunk.metadata['total_chunks'] = len(chunks)
 
+        # Extract writers from video content (transcript + visual analysis)
+        try:
+            writer_manager = get_writer_manager()
+            writer_ids = writer_manager.process_document_for_writers(filename, video_text)
+            logger.info(f"Extracted {len(writer_ids)} writers from video {filename}")
+        except Exception as e:
+            logger.error(f"Error extracting writers from video {filename}: {e}")
+            writer_ids = []
+
         # Create FAISS vector store
         db = FAISS.from_documents(chunks, embeddings_model)
 
@@ -538,7 +562,8 @@ def create_video_embeddings(file_path: str, force_refresh: bool = False, num_fra
             'created_at': datetime.now().isoformat(),
             'model_used': EMBEDDING_MODEL,
             'content_type': 'video',
-            'video_metadata': video_metadata
+            'video_metadata': video_metadata,
+            'writers_extracted': writer_ids  # Add writer IDs to metadata
         }
 
         os.makedirs(METADATA_FOLDER, exist_ok=True)
@@ -1201,6 +1226,10 @@ async def get_system_status():
     doc_items = [f for f, m in document_metadata.items() if m.get('content_type') != 'video']
     video_items = [f for f, m in document_metadata.items() if m.get('content_type') == 'video']
 
+    # Get writer statistics
+    writer_manager = get_writer_manager()
+    writer_stats = writer_manager.get_document_stats()
+
     return {
         "rag_model": MODEL_NAME,
         "embedding_model": EMBEDDING_MODEL,
@@ -1228,6 +1257,7 @@ async def get_system_status():
             },
             "videos_in_rag": len(video_items)
         },
+        "writers": writer_stats,
         "folders": {
             "docs": DOC_FOLDER,
             "videos": Videos_FOLDER,
@@ -1238,6 +1268,170 @@ async def get_system_status():
         "system_ready": len(document_stores) > 0 or asr_model is not None,
         "timestamp": datetime.now().isoformat()
     }
+
+# ============================================================================
+# Writer Management API Endpoints
+# ============================================================================
+
+class WriterSearchRequest(BaseModel):
+    query: str
+
+class WriterAliasRequest(BaseModel):
+    writer_id: str
+    alias: str
+
+class WriterMergeRequest(BaseModel):
+    writer_id1: str
+    writer_id2: str
+    keep_id: Optional[str] = None
+
+@app.get("/api/writers")
+async def list_writers():
+    """List all writers in the database"""
+    try:
+        writer_manager = get_writer_manager()
+        writers = writer_manager.list_all_writers()
+
+        return {
+            "writers": writers,
+            "total_count": len(writers),
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error listing writers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/writers/stats")
+async def get_writers_stats():
+    """Get statistics about writers"""
+    try:
+        writer_manager = get_writer_manager()
+        stats = writer_manager.get_document_stats()
+
+        return {
+            "stats": stats,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting writer stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/writers/{writer_id}")
+async def get_writer_details(writer_id: str):
+    """Get detailed information about a specific writer"""
+    try:
+        writer_manager = get_writer_manager()
+        writer = writer_manager.get_writer(writer_id)
+
+        if not writer:
+            raise HTTPException(status_code=404, detail=f"Writer {writer_id} not found")
+
+        return {
+            "writer": writer,
+            "timestamp": datetime.now().isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting writer {writer_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/writers/search")
+async def search_writers(request: WriterSearchRequest):
+    """Search for writers by name or information"""
+    try:
+        writer_manager = get_writer_manager()
+        results = writer_manager.search_writers(request.query)
+
+        return {
+            "query": request.query,
+            "results": results,
+            "total_results": len(results),
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error searching writers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/writers/by-name/{name}")
+async def get_writer_by_name(name: str):
+    """Get writer by name (with fuzzy matching)"""
+    try:
+        writer_manager = get_writer_manager()
+        writer = writer_manager.get_writer_by_name(name)
+
+        if not writer:
+            raise HTTPException(status_code=404, detail=f"Writer '{name}' not found")
+
+        return {
+            "writer": writer,
+            "timestamp": datetime.now().isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting writer by name {name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/documents/{filename}/writers")
+async def get_document_writers(filename: str):
+    """Get all writers mentioned in a specific document or video"""
+    try:
+        decoded_filename = unquote(filename)
+        writer_manager = get_writer_manager()
+        writers = writer_manager.get_writers_by_document(decoded_filename)
+
+        return {
+            "document": decoded_filename,
+            "writers": writers,
+            "total_writers": len(writers),
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting writers for document {filename}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/writers/add-alias")
+async def add_writer_alias(request: WriterAliasRequest):
+    """Add an alias to a writer"""
+    try:
+        writer_manager = get_writer_manager()
+        writer_manager.add_alias(request.writer_id, request.alias)
+
+        return {
+            "message": f"Alias '{request.alias}' added to writer {request.writer_id}",
+            "status": "success",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error adding alias: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/writers/merge")
+async def merge_writers(request: WriterMergeRequest):
+    """Merge two writer entries (for handling duplicates)"""
+    try:
+        writer_manager = get_writer_manager()
+        success = writer_manager.merge_writers(
+            request.writer_id1,
+            request.writer_id2,
+            request.keep_id
+        )
+
+        if success:
+            return {
+                "message": f"Writers merged successfully",
+                "status": "success",
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            raise HTTPException(status_code=400, detail="Failed to merge writers")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error merging writers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
 # System Initialization
