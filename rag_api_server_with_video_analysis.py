@@ -189,7 +189,7 @@ def extract_video_content_as_text(video_path: str, num_frames: int = 10) -> Tupl
         audio_path = video_path + ".wav"
         subprocess.run([
             "ffmpeg", "-i", video_path, "-ar", "16000", "-ac", "1", audio_path, "-y"
-        ], check=True, capture_output=True, stderr=subprocess.DEVNULL)
+        ], check=True, capture_output=True)
 
         # 1. AUDIO ANALYSIS - Transcribe with Whisper
         result = asr_model.transcribe(audio_path, task="transcribe")
@@ -1318,11 +1318,11 @@ async def startup_event():
     logger.info("Starting Enhanced RAG API with Video Analysis...")
     logger.info("="*80)
 
-    # Initialize RAG system
-    initialize_rag_system()
-
     # Initialize video analysis models
     initialize_video_analysis_models()
+
+    # Initialize RAG system
+    initialize_rag_system()
 
     logger.info("="*80)
     logger.info("System startup complete!")
