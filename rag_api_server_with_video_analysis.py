@@ -785,6 +785,101 @@ def get_document_qa_chain(filename: str = None, use_unified: bool = False, syste
     return rag_chain
 
 # ============================================================================
+# Search Functions
+# ============================================================================
+def search_unified(query: str, top_k: int = 5) -> List[Tuple[Document, float]]:
+    """Search across all documents using unified index"""
+    if not unified_store:
+        raise ValueError("Unified index not available")
+
+    results = unified_store.similarity_search_with_score(query, k=top_k)
+    return results
+
+def search_individual(query: str, filename: str, top_k: int = 5) -> List[Tuple[Document, float]]:
+    """Search within a specific document"""
+    if filename not in document_stores:
+        raise ValueError(f"Document {filename} not found")
+
+    results = document_stores[filename].similarity_search_with_score(query, k=top_k)
+    return results
+
+def search_hybrid(query: str, top_k: int = 5) -> List[Tuple[Document, float]]:
+    """Hybrid search: combine results from all individual stores"""
+    all_results = []
+
+    for filename, store in document_stores.items():
+        results = store.similarity_search_with_score(query, k=top_k)
+        for doc, score in results:
+            doc.metadata['search_source'] = 'individual'
+            all_results.append((doc, score))
+
+    # Sort by score (lower is better for FAISS distance)
+    all_results.sort(key=lambda x: x[1])
+
+    return all_results[:top_k]
+
+def get_document_qa_chain(filename: str = None, use_unified: bool = False):
+    """Get QA chain for a specific document or unified index"""
+    if use_unified and unified_store:
+        retriever = unified_store.as_retriever(search_kwargs={"k": 5})
+    elif filename and filename in document_stores:
+        retriever = document_stores[filename].as_retriever(search_kwargs={"k": 5})
+    else:
+        raise HTTPException(status_code=404, detail="Document or unified index not found")
+
+    llm = Ollama(
+        model=MODEL_NAME,
+        temperature=0.1,
+        top_p=0.9
+    )
+
+    return RetrievalQA.from_chain_type(
+        llm=llm,
+        chain_type="stuff",
+        retriever=retriever,
+        return_source_documents=True
+    )
+
+def get_document_analysis(filename: str):
+    """Generate comprehensive analysis for a document"""
+    if filename not in document_stores:
+        raise HTTPException(status_code=404, detail=f"Document {filename} not found")
+
+    try:
+        # Get relevant chunks for analysis
+        db = document_stores[filename]
+        retriever = db.as_retriever(search_kwargs={"k": 10})
+
+        # Get sample content
+        sample_docs = retriever.get_relevant_documents("summary main topics content")
+        sample_content = "\n".join([doc.page_content for doc in sample_docs[:5]])
+
+        llm = Ollama(model=MODEL_NAME, temperature=0.1)
+
+        analysis_prompt = f"""Please analyze this document and provide a comprehensive summary:
+
+Document: {filename}
+Content Sample:
+{sample_content[:3000]}
+
+Please provide:
+1. A brief summary of the document
+2. Key topics and themes covered
+3. Main findings or conclusions
+4. Document structure and organization
+5. Important concepts or terminology used
+
+Analysis:"""
+
+        analysis = llm(analysis_prompt)
+        return analysis
+
+    except Exception as e:
+        logger.error(f"Error analyzing document {filename}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error analyzing document: {str(e)}")
+
+
+# ============================================================================
 # API Endpoints - Video Analysis
 # ============================================================================
 @app.post("/api/video/upload_and_analyze")
@@ -973,6 +1068,67 @@ Analysis:"""
         logger.error(f"Analysis error for {request.fileName}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/search")
+async def search_documents(request: QueryRequest):
+    """Advanced search endpoint with multiple modes"""
+    try:
+        results = []
+        search_mode = request.search_mode or "unified"
+
+        if search_mode == "unified":
+            if not unified_store:
+                raise HTTPException(status_code=503, detail="Unified index not available. Please refresh documents.")
+
+            search_results = search_unified(request.query, request.top_k)
+
+            for doc, score in search_results:
+                results.append({
+                    "content": doc.page_content,
+                    "source_file": doc.metadata.get('source_file', 'unknown'),
+                    "score": float(score),
+                    "chunk_index": doc.metadata.get('chunk_index', -1),
+                    "metadata": doc.metadata
+                })
+
+        elif search_mode == "individual" and request.fileName:
+            search_results = search_individual(request.query, request.fileName, request.top_k)
+
+            for doc, score in search_results:
+                results.append({
+                    "content": doc.page_content,
+                    "source_file": request.fileName,
+                    "score": float(score),
+                    "chunk_index": doc.metadata.get('chunk_index', -1),
+                    "metadata": doc.metadata
+                })
+
+        elif search_mode == "hybrid":
+            search_results = search_hybrid(request.query, request.top_k)
+
+            for doc, score in search_results:
+                results.append({
+                    "content": doc.page_content,
+                    "source_file": doc.metadata.get('source_file', 'unknown'),
+                    "score": float(score),
+                    "chunk_index": doc.metadata.get('chunk_index', -1),
+                    "metadata": doc.metadata
+                })
+
+        else:
+            raise HTTPException(status_code=400, detail="Invalid search mode or missing filename for individual search")
+
+        return {
+            "query": request.query,
+            "search_mode": search_mode,
+            "results": results,
+            "total_results": len(results),
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Search error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/ask_unified")
 async def ask_unified(request: QueryRequest):
     """Ask the LLM a question using unified index across all documents"""
@@ -1016,6 +1172,54 @@ async def ask_unified(request: QueryRequest):
 
     except Exception as e:
         logger.error(f"Unified query error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/query")
+async def query_documents(request: QueryRequest):
+    """Query endpoint with unified search capability"""
+    try:
+        if request.fileName:
+            # Query specific document
+            qa_chain = get_document_qa_chain(request.fileName)
+            result = qa_chain({"query": request.query})
+            response = result['result']
+            source = request.fileName
+
+            sources = []
+            if 'source_documents' in result:
+                for doc in result['source_documents']:
+                    sources.append({
+                        'file': request.fileName,
+                        'content_preview': doc.page_content[:200]
+                    })
+        else:
+            # Use unified index for cross-document search
+            if not unified_store:
+                raise HTTPException(status_code=503, detail="Unified index not available. Please refresh documents.")
+
+            qa_chain = get_document_qa_chain(use_unified=True)
+            result = qa_chain({"query": request.query})
+            response = result['result']
+            source = "all_documents"
+
+            sources = []
+            if 'source_documents' in result:
+                for doc in result['source_documents']:
+                    sources.append({
+                        'file': doc.metadata.get('source_file', 'unknown'),
+                        'content_preview': doc.page_content[:200]
+                    })
+
+        return {
+            "response": response,
+            "source": source,
+            "sources_used": sources,
+            "timestamp": datetime.now().isoformat(),
+            "status": "success"
+        }
+
+    except Exception as e:
+        logger.error(f"Query error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/documents")
