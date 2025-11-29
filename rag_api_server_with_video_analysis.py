@@ -16,8 +16,8 @@ from langchain_community.document_loaders import TextLoader, PyPDFLoader, Docx2t
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chains.combine_documents import create_retrieval_chain
-from langchain_chains.combine_documents import create_stuff_documents_chain
+from langchain.chains.combine_documents import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_ollama import ChatOllama
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
