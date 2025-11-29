@@ -13,12 +13,14 @@ from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
 import uvicorn
 from langchain_community.document_loaders import TextLoader, PyPDFLoader, Docx2txtLoader, UnstructuredFileLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.chains import RetrievalQA
-from langchain_community.llms import Ollama
-from langchain.schema import Document
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_ollama import ChatOllama
+from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
 import logging
 from pathlib import Path
 import hashlib
@@ -755,7 +757,7 @@ def scan_and_process_all_content():
         build_unified_index()
         logger.info(f"Unified index includes {len(document_stores)} items (documents + videos)")
 
-def get_document_qa_chain(filename: str = None, use_unified: bool = False):
+def get_document_qa_chain(filename: str = None, use_unified: bool = False, system_message: str = ""):
     """Get QA chain for a specific document or unified index"""
     if use_unified and unified_store:
         retriever = unified_store.as_retriever(search_kwargs={"k": 5})
@@ -764,18 +766,23 @@ def get_document_qa_chain(filename: str = None, use_unified: bool = False):
     else:
         raise HTTPException(status_code=404, detail="Document or unified index not found")
 
-    llm = Ollama(
+    llm = ChatOllama(
         model=MODEL_NAME,
         temperature=0.1,
-        top_p=0.9
     )
 
-    return RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=retriever,
-        return_source_documents=True
-    )
+    # Create prompt template
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_message if system_message else "You are a helpful assistant. Use the following context to answer the user's question."),
+        ("system", "Context: {context}"),
+        ("human", "{input}"),
+    ])
+
+    # Create the chains
+    question_answer_chain = create_stuff_documents_chain(llm, prompt)
+    rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+
+    return rag_chain
 
 # ============================================================================
 # API Endpoints - Video Analysis
@@ -890,19 +897,19 @@ async def chat_with_document(request: ChatRequest):
     """Chat endpoint for document-specific Q&A"""
     try:
         logger.info(f"Chat request for document: {request.fileName}")
-        qa_chain = get_document_qa_chain(request.fileName)
-        result = qa_chain({"query": "جاوب بالعربية, " + request.message})
+        qa_chain = get_document_qa_chain(request.fileName, system_message="جاوب بالعربية (Answer in Arabic)")
+        result = qa_chain.invoke({"input": request.message})
 
         sources = []
-        if 'source_documents' in result:
-            for doc in result['source_documents']:
+        if 'context' in result:
+            for doc in result['context']:
                 sources.append({
                     'content': doc.page_content[:200],
                     'chunk_index': doc.metadata.get('chunk_index', -1)
                 })
 
         return {
-            "response": result['result'],
+            "response": result['answer'],
             "fileName": request.fileName,
             "timestamp": request.timestamp,
             "status": "success"
@@ -923,10 +930,10 @@ async def analyze_document(request: AnalyzeRequest):
 
         db = document_stores[request.fileName]
         retriever = db.as_retriever(search_kwargs={"k": 10})
-        sample_docs = retriever.get_relevant_documents("summary main topics content")
+        sample_docs = retriever.invoke("summary main topics content")
         sample_content = "\n".join([doc.page_content for doc in sample_docs[:5]])
 
-        llm = Ollama(model=MODEL_NAME, temperature=0.1)
+        llm = ChatOllama(model=MODEL_NAME, temperature=0.1)
 
         analysis_prompt = f"""Please analyze this document and provide a comprehensive summary:
 
@@ -943,7 +950,7 @@ Please provide:
 
 Analysis:"""
 
-        analysis = llm(analysis_prompt)
+        analysis = llm.invoke(analysis_prompt).content
 
         os.makedirs(SUMMARY_FOLDER, exist_ok=True)
         summary_path = os.path.join(SUMMARY_FOLDER, f"{request.fileName}.analysis.txt")
@@ -975,18 +982,18 @@ async def ask_unified(request: QueryRequest):
 
         logger.info(f"Unified query: {request.query}")
 
-        qa_chain = get_document_qa_chain(use_unified=True)
-
-        query = request.query
+        system_msg = "You are a helpful assistant."
         if request.language and request.language.lower() == "arabic":
-            query = "جاوب بالعربية, " + query
+            system_msg = "جاوب بالعربية (Answer in Arabic). You are a helpful assistant."
 
-        result = qa_chain({"query": query})
+        qa_chain = get_document_qa_chain(use_unified=True, system_message=system_msg)
+
+        result = qa_chain.invoke({"input": request.query})
 
         sources = []
         source_files = set()
-        if 'source_documents' in result:
-            for doc in result['source_documents']:
+        if 'context' in result:
+            for doc in result['context']:
                 source_file = doc.metadata.get('source_file', 'unknown')
                 source_files.add(source_file)
                 sources.append({
@@ -996,7 +1003,7 @@ async def ask_unified(request: QueryRequest):
                 })
 
         return {
-            "response": result['result'],
+            "response": result['answer'],
             "query": request.query,
             "source": "unified_index",
             "sources_used": sources,
