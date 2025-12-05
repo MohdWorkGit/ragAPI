@@ -1,0 +1,14 @@
+[
+  {
+    "document_name": "sample_article1.pdf",
+    "document_path": "test_data/sample_article1.pdf",
+    "ground_truth_writers": [],
+    "note": "املأ ground_truth_writers يدويًا بأسماء الكتّاب الفعليين في المستند"
+  },
+  {
+    "document_name": "sample_article2.pdf",
+    "document_path": "test_data/sample_article2.pdf",
+    "ground_truth_writers": [],
+    "note": "املأ ground_truth_writers يدويًا بأسماء الكتّاب الفعليين في المستند"
+  }
+]
