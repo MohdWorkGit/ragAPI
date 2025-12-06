@@ -1,6 +1,6 @@
 """
 توليد تقارير إحصائية شاملة - Comprehensive Statistical Report Generator
-يولد تقارير بصيغ: JSON, Markdown, LaTeX, HTML
+يولد تقارير بصيغ: JSON, Markdown, Text
 """
 
 import json
@@ -256,125 +256,138 @@ class ReportGenerator:
         logger.info(f"✓ تم حفظ تقرير Markdown: {output_file}")
         return output_file
 
-    def generate_latex_tables(self) -> Path:
-        """توليد جداول LaTeX جاهزة للبحث العلمي"""
-        logger.info("توليد جداول LaTeX...")
+    def generate_text_summary(self) -> Path:
+        """توليد ملخص نصي بسيط"""
+        logger.info("توليد ملخص نصي...")
 
-        output_file = REPORTS_DIR / "latex_tables.tex"
+        output_file = REPORTS_DIR / "summary.txt"
 
-        latex_content = r"""\documentclass{article}
-\usepackage[utf8]{inputenc}
-\usepackage{booktabs}
-\usepackage{array}
+        text_content = f"""
+{'='*80}
+تقرير شامل لنتائج اختبارات نظام RAG API مع تحليل الفيديو
+Comprehensive RAG API Test Results Report
+{'='*80}
 
-\begin{document}
+تاريخ التقرير: {self.report_date}
+Report Date: {self.report_date}
 
+{'='*80}
+1. نتائج البحث الدلالي (Search Performance)
+{'='*80}
 """
 
-        # جدول البحث الدلالي
         if self.data['search_performance']:
             sp = self.data['search_performance']
-
-            latex_content += r"""
-\begin{table}[h]
-\centering
-\caption{مقاييس أداء البحث الدلالي}
-\label{tab:search_performance}
-\begin{tabular}{lcccc}
-\toprule
-\textbf{المقياس} & \textbf{k=1} & \textbf{k=3} & \textbf{k=5} & \textbf{k=10} \\
-\midrule
+            text_content += f"""
+مقاييس الدقة (Accuracy Metrics):
+{'-'*80}
+المقياس          k=1      k=3      k=5      k=10
+{'-'*80}
 """
-
             # Precision
-            latex_content += "Precision & "
-            latex_content += " & ".join([
-                f"{sp['avg_precision_at_k'].get(str(k), 0):.2f}"
-                for k in [1, 3, 5, 10]
-            ])
-            latex_content += " \\\\\n"
+            precision_line = "Precision      "
+            for k in [1, 3, 5, 10]:
+                val = sp['avg_precision_at_k'].get(str(k), 0)
+                precision_line += f"{val:>8.3f} "
+            text_content += precision_line + "\n"
 
             # Recall
-            latex_content += "Recall & "
-            latex_content += " & ".join([
-                f"{sp['avg_recall_at_k'].get(str(k), 0):.2f}"
-                for k in [1, 3, 5, 10]
-            ])
-            latex_content += " \\\\\n"
+            recall_line = "Recall         "
+            for k in [1, 3, 5, 10]:
+                val = sp['avg_recall_at_k'].get(str(k), 0)
+                recall_line += f"{val:>8.3f} "
+            text_content += recall_line + "\n"
 
             # F1-Score
-            latex_content += "F1-Score & "
-            latex_content += " & ".join([
-                f"{sp['avg_f1_at_k'].get(str(k), 0):.2f}"
-                for k in [1, 3, 5, 10]
-            ])
-            latex_content += " \\\\\n"
+            f1_line = "F1-Score       "
+            for k in [1, 3, 5, 10]:
+                val = sp['avg_f1_at_k'].get(str(k), 0)
+                f1_line += f"{val:>8.3f} "
+            text_content += f1_line + "\n"
 
-            latex_content += r"""\bottomrule
-\end{tabular}
-\end{table}
-
+            text_content += f"""
+{'-'*80}
+مقاييس أخرى (Other Metrics):
+  - MRR (Mean Reciprocal Rank): {sp.get('mrr', 0):.3f}
+  - متوسط زمن الاستجابة: {sp.get('avg_response_time', 0):.3f} ثانية
+  - الانحراف المعياري: {sp.get('std_response_time', 0):.3f} ثانية
+  - عدد الاستعلامات المختبرة: {sp.get('num_queries', 0)}
 """
 
-        # جدول تحليل الفيديو
         if self.data['video_analysis']:
             va = self.data['video_analysis']
+            text_content += f"""
+{'='*80}
+2. نتائج تحليل الفيديو (Video Analysis)
+{'='*80}
 
-            latex_content += r"""
-\begin{table}[h]
-\centering
-\caption{دقة تحليل الفيديو}
-\label{tab:video_analysis}
-\begin{tabular}{lc}
-\toprule
-\textbf{المقياس} & \textbf{القيمة} \\
-\midrule
+دقة النسخ الصوتي (Transcription Accuracy):
+  - WER (Word Error Rate): {va.get('avg_wer', 0)*100:.2f}%
+  - CER (Character Error Rate): {va.get('avg_cer', 0)*100:.2f}%
+
+جودة التلخيص (Summary Quality - ROUGE Scores):
+  - ROUGE-1: {va.get('avg_rouge1', 0):.3f}
+  - ROUGE-2: {va.get('avg_rouge2', 0):.3f}
+  - ROUGE-L: {va.get('avg_rougeL', 0):.3f}
+
+  - عدد الفيديوهات المختبرة: {va.get('num_videos', 0)}
 """
 
-            latex_content += f"WER (\\%) & {va.get('avg_wer', 0)*100:.2f} \\\\\n"
-            latex_content += f"CER (\\%) & {va.get('avg_cer', 0)*100:.2f} \\\\\n"
-            latex_content += f"ROUGE-1 & {va.get('avg_rouge1', 0):.3f} \\\\\n"
-            latex_content += f"ROUGE-2 & {va.get('avg_rouge2', 0):.3f} \\\\\n"
-            latex_content += f"ROUGE-L & {va.get('avg_rougeL', 0):.3f} \\\\\n"
-
-            latex_content += r"""\bottomrule
-\end{tabular}
-\end{table}
-
-"""
-
-        # جدول استخراج الكتّاب
         if self.data['writer_extraction']:
             we = self.data['writer_extraction']
+            text_content += f"""
+{'='*80}
+3. نتائج استخراج الكتّاب (Writer Extraction)
+{'='*80}
 
-            latex_content += r"""
-\begin{table}[h]
-\centering
-\caption{أداء استخراج الكتّاب}
-\label{tab:writer_extraction}
-\begin{tabular}{lc}
-\toprule
-\textbf{المقياس} & \textbf{النسبة المئوية} \\
-\midrule
+مقاييس الاستخراج (Extraction Metrics):
+  - Precision: {we.get('avg_precision', 0)*100:.2f}%
+  - Recall: {we.get('avg_recall', 0)*100:.2f}%
+  - F1-Score: {we.get('avg_f1', 0)*100:.2f}%
+
+  - عدد المستندات المختبرة: {we.get('num_documents', 0)}
 """
 
-            latex_content += f"Precision & {we.get('avg_precision', 0)*100:.2f}\\% \\\\\n"
-            latex_content += f"Recall & {we.get('avg_recall', 0)*100:.2f}\\% \\\\\n"
-            latex_content += f"F1-Score & {we.get('avg_f1', 0)*100:.2f}\\% \\\\\n"
-
-            latex_content += r"""\bottomrule
-\end{tabular}
-\end{table}
-
+        if self.data['performance_metrics']:
+            pm = self.data['performance_metrics']
+            text_content += f"""
+{'='*80}
+4. مقاييس الأداء (Performance Metrics)
+{'='*80}
 """
 
-        latex_content += r"\end{document}"
+            if pm.get('document_processing'):
+                dp = pm['document_processing']
+                text_content += f"""
+معالجة المستندات (Document Processing):
+  - متوسط زمن المعالجة: {dp.get('avg_time', 0):.2f} ثانية
+  - الانحراف المعياري: {dp.get('std_time', 0):.2f} ثانية
+"""
+
+            if pm.get('video_processing'):
+                vp = pm['video_processing']
+                text_content += f"""
+معالجة الفيديو (Video Processing):
+  - متوسط زمن المعالجة: {vp.get('avg_time', 0):.2f} ثانية
+  - الانحراف المعياري: {vp.get('std_time', 0):.2f} ثانية
+"""
+
+        text_content += f"""
+{'='*80}
+الخلاصة (Summary)
+{'='*80}
+
+تم توليد هذا التقرير تلقائياً بواسطة برنامج اختبار نظام RAG API
+This report was automatically generated by the RAG API test suite
+
+{'='*80}
+"""
 
         # حفظ الملف
         with open(output_file, 'w', encoding='utf-8') as f:
-            f.write(latex_content)
+            f.write(text_content)
 
-        logger.info(f"✓ تم حفظ جداول LaTeX: {output_file}")
+        logger.info(f"✓ تم حفظ الملخص النصي: {output_file}")
         return output_file
 
     def generate_json_summary(self) -> Path:
@@ -427,7 +440,7 @@ class ReportGenerator:
 
         # توليد التقارير
         md_file = self.generate_markdown_report()
-        latex_file = self.generate_latex_tables()
+        text_file = self.generate_text_summary()
         json_file = self.generate_json_summary()
 
         logger.info("\n" + "="*80)
@@ -435,13 +448,13 @@ class ReportGenerator:
         logger.info("="*80)
         logger.info(f"\nالملفات المُنشأة:")
         logger.info(f"  📄 Markdown: {md_file}")
-        logger.info(f"  📊 LaTeX: {latex_file}")
+        logger.info(f"  📝 Text: {text_file}")
         logger.info(f"  📋 JSON: {json_file}")
         logger.info(f"\nجميع التقارير في: {REPORTS_DIR.absolute()}\n")
 
         return {
             'markdown': md_file,
-            'latex': latex_file,
+            'text': text_file,
             'json': json_file
         }
 

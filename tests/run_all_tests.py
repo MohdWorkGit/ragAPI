@@ -61,7 +61,7 @@ def run_all_tests(skip_tests: list = None):
             search_tester.load_test_queries("test_data/search_queries.json")
             search_results = search_tester.run_tests(k_values=[1, 3, 5, 10])
             search_tester.save_results()
-            search_tester.generate_latex_table()
+            search_tester.generate_markdown_table()
             results['search'] = 'SUCCESS ✅'
             logger.info("✅ اكتمل اختبار البحث الدلالي بنجاح")
         except Exception as e:

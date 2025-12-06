@@ -7,15 +7,25 @@ import json
 import time
 import numpy as np
 from typing import List, Dict, Tuple
-import requests
 from pathlib import Path
 import logging
+import sys
+
+# إضافة المسار الجذري للمشروع
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# استيراد الوحدات المطلوبة مباشرة
+from rag_api_server_with_video_analysis import (
+    search_unified,
+    unified_store,
+    initialize_rag_system,
+    embeddings_model
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # إعدادات الاختبار
-API_BASE_URL = "http://localhost:8000"
 RESULTS_DIR = Path("test_results")
 RESULTS_DIR.mkdir(exist_ok=True)
 
@@ -23,8 +33,7 @@ RESULTS_DIR.mkdir(exist_ok=True)
 class SearchPerformanceTester:
     """اختبار شامل لأداء البحث الدلالي"""
 
-    def __init__(self, api_url: str = API_BASE_URL):
-        self.api_url = api_url
+    def __init__(self):
         self.test_queries = []
         self.results = {
             'precision_at_k': {},
@@ -34,6 +43,11 @@ class SearchPerformanceTester:
             'response_times': [],
             'detailed_results': []
         }
+
+        # تهيئة نظام RAG إذا لم يكن مهيئاً
+        if embeddings_model is None:
+            logger.info("تهيئة نظام RAG...")
+            initialize_rag_system()
 
     def load_test_queries(self, queries_file: str = None):
         """
@@ -79,7 +93,7 @@ class SearchPerformanceTester:
 
     def search(self, query: str, top_k: int = 5, language: str = None) -> Tuple[List[Dict], float]:
         """
-        إجراء بحث عبر API
+        إجراء بحث مباشرة باستخدام الدوال
 
         Returns:
             (results, response_time)
@@ -87,25 +101,26 @@ class SearchPerformanceTester:
         start_time = time.time()
 
         try:
-            response = requests.post(
-                f"{self.api_url}/api/search",
-                json={
-                    "query": query,
-                    "search_mode": "unified",
-                    "top_k": top_k,
-                    "language": language
-                },
-                timeout=30
-            )
+            # استدعاء دالة البحث مباشرة
+            if unified_store is None:
+                logger.error("Unified index not available")
+                return [], 0.0
+
+            search_results = search_unified(query, top_k=top_k)
+
+            # تحويل النتائج إلى التنسيق المتوقع
+            results = []
+            for doc, score in search_results:
+                results.append({
+                    'content': doc.page_content,
+                    'source_file': doc.metadata.get('source_file', 'unknown'),
+                    'score': float(score),
+                    'chunk_index': doc.metadata.get('chunk_index', -1),
+                    'metadata': doc.metadata
+                })
 
             response_time = time.time() - start_time
-
-            if response.status_code == 200:
-                data = response.json()
-                return data.get('results', []), response_time
-            else:
-                logger.error(f"فشل البحث: {response.status_code}")
-                return [], response_time
+            return results, response_time
 
         except Exception as e:
             logger.error(f"خطأ في البحث: {e}")
@@ -314,55 +329,48 @@ class SearchPerformanceTester:
         logger.info(f"\n✅ تم حفظ النتائج في: {output_path}")
         return output_path
 
-    def generate_latex_table(self, filename: str = "search_results_table.tex"):
-        """توليد جدول LaTeX للبحث العلمي"""
+    def generate_markdown_table(self, filename: str = "search_results_table.md"):
+        """توليد جدول Markdown للبحث العلمي"""
         output_path = RESULTS_DIR / filename
 
-        latex_content = r"""\begin{table}[h]
-\centering
-\caption{مقاييس أداء البحث الدلالي}
-\label{tab:search_performance}
-\begin{tabular}{|l|c|c|c|c|}
-\hline
-\textbf{المقياس} & \textbf{k=1} & \textbf{k=3} & \textbf{k=5} & \textbf{k=10} \\
-\hline
+        markdown_content = f"""# مقاييس أداء البحث الدلالي
+## Search Performance Metrics
+
+| المقياس (Metric) | k=1 | k=3 | k=5 | k=10 |
+|------------------|-----|-----|-----|------|
 """
 
         # Precision row
-        latex_content += "Precision & "
-        latex_content += " & ".join([
-            f"{self.results['avg_precision_at_k'].get(k, 0):.2f}"
-            for k in [1, 3, 5, 10]
-        ])
-        latex_content += " \\\\\n"
+        markdown_content += "| **Precision** |"
+        for k in [1, 3, 5, 10]:
+            markdown_content += f" {self.results['avg_precision_at_k'].get(k, 0):.3f} |"
+        markdown_content += "\n"
 
         # Recall row
-        latex_content += "Recall & "
-        latex_content += " & ".join([
-            f"{self.results['avg_recall_at_k'].get(k, 0):.2f}"
-            for k in [1, 3, 5, 10]
-        ])
-        latex_content += " \\\\\n"
+        markdown_content += "| **Recall** |"
+        for k in [1, 3, 5, 10]:
+            markdown_content += f" {self.results['avg_recall_at_k'].get(k, 0):.3f} |"
+        markdown_content += "\n"
 
         # F1-Score row
-        latex_content += "F1-Score & "
-        latex_content += " & ".join([
-            f"{self.results['avg_f1_at_k'].get(k, 0):.2f}"
-            for k in [1, 3, 5, 10]
-        ])
-        latex_content += " \\\\\n"
+        markdown_content += "| **F1-Score** |"
+        for k in [1, 3, 5, 10]:
+            markdown_content += f" {self.results['avg_f1_at_k'].get(k, 0):.3f} |"
+        markdown_content += "\n"
 
-        latex_content += r"""\hline
-\end{tabular}
-\end{table}
+        markdown_content += f"""
+## Additional Metrics
 
-\noindent
-MRR (Mean Reciprocal Rank): """ + f"{self.results['mrr']:.2f}"
+- **MRR (Mean Reciprocal Rank):** {self.results['mrr']:.3f}
+- **Average Response Time:** {self.results['avg_response_time']:.3f} seconds
+- **Standard Deviation:** {self.results['std_response_time']:.3f} seconds
+- **Number of Queries Tested:** {len(self.test_queries)}
+"""
 
         with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(latex_content)
+            f.write(markdown_content)
 
-        logger.info(f"✅ تم حفظ جدول LaTeX في: {output_path}")
+        logger.info(f"✅ تم حفظ جدول Markdown في: {output_path}")
         return output_path
 
 
@@ -384,7 +392,7 @@ def main():
 
     # حفظ النتائج
     tester.save_results()
-    tester.generate_latex_table()
+    tester.generate_markdown_table()
 
     print("\n✅ اكتملت جميع الاختبارات بنجاح!")
 
