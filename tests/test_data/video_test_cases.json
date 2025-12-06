@@ -1,0 +1,18 @@
+[
+  {
+    "video_filename": "sample_video1.mp4",
+    "language": "arabic",
+    "reference_transcript": "",
+    "reference_summary": "",
+    "duration_seconds": 0,
+    "note": "املأ reference_transcript و reference_summary يدويًا بعد النسخ اليدوي للفيديو"
+  },
+  {
+    "video_filename": "sample_video2.mp4",
+    "language": "english",
+    "reference_transcript": "",
+    "reference_summary": "",
+    "duration_seconds": 0,
+    "note": "املأ reference_transcript و reference_summary يدويًا بعد النسخ اليدوي للفيديو"
+  }
+]

@@ -1,0 +1,33 @@
+[
+  {
+    "query": "ما هي أحدث التطورات في مجال الطاقة المتجددة؟",
+    "language": "arabic",
+    "relevant_docs": [],
+    "top_relevant": null,
+    "note": "يجب ملء relevant_docs يدويًا بناءً على المستندات المتاحة"
+  },
+  {
+    "query": "renewable energy developments",
+    "language": "english",
+    "relevant_docs": [],
+    "top_relevant": null
+  },
+  {
+    "query": "التطورات الاقتصادية في المنطقة",
+    "language": "arabic",
+    "relevant_docs": [],
+    "top_relevant": null
+  },
+  {
+    "query": "climate change impact",
+    "language": "english",
+    "relevant_docs": [],
+    "top_relevant": null
+  },
+  {
+    "query": "التكنولوجيا والابتكار",
+    "language": "arabic",
+    "relevant_docs": [],
+    "top_relevant": null
+  }
+]
