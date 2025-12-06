@@ -10,8 +10,25 @@ import numpy as np
 from typing import List, Dict
 from pathlib import Path
 import logging
-import requests
 import os
+import sys
+
+# إضافة المسار الجذري للمشروع
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# استيراد الوحدات المطلوبة مباشرة
+from rag_api_server_with_video_analysis import (
+    create_document_embeddings,
+    create_video_embeddings,
+    process_video_file,
+    search_unified,
+    initialize_rag_system,
+    initialize_video_analysis_models,
+    DOC_FOLDER,
+    Videos_FOLDER,
+    embeddings_model,
+    asr_model
+)
 
 try:
     import GPUtil
@@ -24,7 +41,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # إعدادات الاختبار
-API_BASE_URL = "http://localhost:8000"
 RESULTS_DIR = Path("test_results")
 RESULTS_DIR.mkdir(exist_ok=True)
 
@@ -32,8 +48,7 @@ RESULTS_DIR.mkdir(exist_ok=True)
 class PerformanceTester:
     """اختبار شامل لمقاييس الأداء والموارد"""
 
-    def __init__(self, api_url: str = API_BASE_URL):
-        self.api_url = api_url
+    def __init__(self):
         self.process = psutil.Process(os.getpid())
         self.results = {
             'document_processing': [],
@@ -46,6 +61,15 @@ class PerformanceTester:
                 'gpu': []
             }
         }
+
+        # تهيئة النظام إذا لم يكن مهيئاً
+        if embeddings_model is None:
+            logger.info("تهيئة نظام RAG...")
+            initialize_rag_system()
+
+        if asr_model is None:
+            logger.info("تهيئة نماذج تحليل الفيديو...")
+            initialize_video_analysis_models()
 
     def get_resource_usage(self) -> Dict:
         """
@@ -105,13 +129,8 @@ class PerformanceTester:
             start_time = time.time()
 
             try:
-                # محاكاة معالجة المستند (في حالة عدم وجود API نشط)
-                # يمكن استبدال هذا باستدعاء API حقيقي
-                response = requests.post(
-                    f"{self.api_url}/api/refresh",
-                    json={"fileName": doc_name, "rebuild_unified": False},
-                    timeout=60
-                )
+                # استدعاء دالة المعالجة مباشرة
+                success = create_document_embeddings(str(doc_path), force_refresh=True)
 
                 processing_time = time.time() - start_time
 
@@ -127,7 +146,7 @@ class PerformanceTester:
                     'processing_time': processing_time,
                     'memory_delta_mb': memory_delta,
                     'cpu_percent': resources_after['cpu_percent'],
-                    'success': response.status_code == 200 if response else False
+                    'success': success
                 }
 
                 self.results['document_processing'].append(result)
@@ -177,15 +196,8 @@ class PerformanceTester:
             start_time = time.time()
 
             try:
-                response = requests.post(
-                    f"{self.api_url}/api/video/analyze_existing",
-                    json={
-                        "video_filename": video_name,
-                        "num_frames": 10,
-                        "output_language": "arabic"
-                    },
-                    timeout=300
-                )
+                # استدعاء دالة معالجة الفيديو مباشرة
+                data = process_video_file(str(video_path), num_frames=10, output_language="arabic")
 
                 processing_time = time.time() - start_time
 
@@ -198,11 +210,10 @@ class PerformanceTester:
                     'total_processing_time': processing_time,
                     'memory_delta_mb': resources_after['memory_mb'] - resources_before['memory_mb'],
                     'cpu_percent': resources_after['cpu_percent'],
-                    'success': response.status_code == 200 if response else False
+                    'success': data.get('status') == 'success' if data else False
                 }
 
-                if response and response.status_code == 200:
-                    data = response.json()
+                if data:
                     result['num_frames_analyzed'] = data.get('num_frames_analyzed', 0)
                     result['detected_language'] = data.get('detected_language', 'unknown')
 
@@ -243,19 +254,12 @@ class PerformanceTester:
                 start_time = time.time()
 
                 try:
-                    response = requests.post(
-                        f"{self.api_url}/api/search",
-                        json={
-                            "query": query,
-                            "search_mode": "unified",
-                            "top_k": 5
-                        },
-                        timeout=30
-                    )
+                    # استدعاء دالة البحث مباشرة
+                    results = search_unified(query, top_k=5)
 
                     search_time = time.time() - start_time
 
-                    if response.status_code == 200:
+                    if results:
                         search_times.append(search_time * 1000)  # تحويل لميلي ثانية
 
                 except Exception as e:
@@ -291,13 +295,10 @@ class PerformanceTester:
         def make_search_request():
             start = time.time()
             try:
-                response = requests.post(
-                    f"{self.api_url}/api/search",
-                    json={"query": "test query", "search_mode": "unified", "top_k": 5},
-                    timeout=30
-                )
+                # استدعاء دالة البحث مباشرة
+                results = search_unified("test query", top_k=5)
                 elapsed = time.time() - start
-                return {'success': response.status_code == 200, 'time': elapsed}
+                return {'success': results is not None and len(results) > 0, 'time': elapsed}
             except Exception as e:
                 return {'success': False, 'time': 0, 'error': str(e)}
 

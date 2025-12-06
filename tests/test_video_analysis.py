@@ -7,17 +7,28 @@ import json
 import time
 import numpy as np
 from typing import List, Dict, Tuple
-import requests
 from pathlib import Path
 import logging
 from difflib import SequenceMatcher
 import re
+import sys
+import os
+
+# إضافة المسار الجذري للمشروع
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# استيراد الوحدات المطلوبة مباشرة
+from rag_api_server_with_video_analysis import (
+    process_video_file,
+    initialize_video_analysis_models,
+    Videos_FOLDER,
+    asr_model
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # إعدادات الاختبار
-API_BASE_URL = "http://localhost:8000"
 RESULTS_DIR = Path("test_results")
 RESULTS_DIR.mkdir(exist_ok=True)
 
@@ -25,8 +36,7 @@ RESULTS_DIR.mkdir(exist_ok=True)
 class VideoAnalysisTester:
     """اختبار شامل لأداء تحليل الفيديو"""
 
-    def __init__(self, api_url: str = API_BASE_URL):
-        self.api_url = api_url
+    def __init__(self):
         self.test_videos = []
         self.results = {
             'wer_scores': [],
@@ -39,6 +49,11 @@ class VideoAnalysisTester:
             'processing_times': [],
             'detailed_results': []
         }
+
+        # تهيئة نماذج تحليل الفيديو إذا لم تكن مهيئة
+        if asr_model is None:
+            logger.info("تهيئة نماذج تحليل الفيديو...")
+            initialize_video_analysis_models()
 
     def load_test_videos(self, videos_file: str = None):
         """
@@ -79,7 +94,7 @@ class VideoAnalysisTester:
 
     def analyze_video(self, video_filename: str, language: str = "arabic") -> Tuple[Dict, float]:
         """
-        تحليل فيديو عبر API
+        تحليل فيديو مباشرة باستخدام الدوال
 
         Returns:
             (results, processing_time)
@@ -87,24 +102,18 @@ class VideoAnalysisTester:
         start_time = time.time()
 
         try:
-            response = requests.post(
-                f"{self.api_url}/api/video/analyze_existing",
-                json={
-                    "video_filename": video_filename,
-                    "num_frames": 10,
-                    "output_language": language
-                },
-                timeout=300  # 5 minutes timeout
-            )
+            # بناء المسار الكامل للفيديو
+            video_path = os.path.join(Videos_FOLDER, video_filename)
+
+            if not os.path.exists(video_path):
+                logger.error(f"Video file {video_filename} not found in {Videos_FOLDER}")
+                return {}, 0.0
+
+            # استدعاء دالة معالجة الفيديو مباشرة
+            result = process_video_file(video_path, num_frames=10, output_language=language)
 
             processing_time = time.time() - start_time
-
-            if response.status_code == 200:
-                data = response.json()
-                return data, processing_time
-            else:
-                logger.error(f"فشل تحليل الفيديو: {response.status_code}")
-                return {}, processing_time
+            return result, processing_time
 
         except Exception as e:
             logger.error(f"خطأ في تحليل الفيديو: {e}")
