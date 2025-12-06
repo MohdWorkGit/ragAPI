@@ -16,8 +16,11 @@ from langchain_community.document_loaders import TextLoader, PyPDFLoader, Docx2t
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
-# from langchain.chains.combine_documents import create_retrieval_chain
-# from langchain.chains.combine_documents import create_stuff_documents_chain
+#from langchain.chains.retrieval import create_retrieval_chain
+from langchain_classic.chains import create_retrieval_chain
+from langchain_classic.chains import RetrievalQA
+#from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_ollama import ChatOllama
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
@@ -57,7 +60,7 @@ METADATA_FOLDER = "metadata"
 SUMMARY_FOLDER = "summaries"
 UNIFIED_EMBEDDINGS_PATH = "embeddings/unified_index.faiss"
 UNIFIED_METADATA_PATH = "metadata/unified_index.metadata.json"
-MODEL_NAME = "gemma3"  # Ollama model for RAG
+MODEL_NAME = "qwen3"  # Ollama model for RAG
 EMBEDDING_MODEL = "BAAI/bge-m3"
 
 # Video Analysis Configuration
@@ -176,7 +179,7 @@ def extract_key_visual_features(frames: List[Image.Image]) -> str:
 
     visual_descriptions = []
     for frame in sample_frames:
-        inputs = blip_processor(frame, "What is happening in this image?", return_tensors="pt").to(DEVICE)
+        inputs = blip_processor(frame, return_tensors="pt").to(DEVICE)
         out = blip_model.generate(**inputs, max_length=100)
         description = blip_processor.decode(out[0], skip_special_tokens=True)
         visual_descriptions.append(description)
@@ -210,6 +213,7 @@ def extract_video_content_as_text(video_path: str, num_frames: int = 10) -> Tupl
 
         # Get visual summary
         visual_summary = extract_key_visual_features(frames)
+        logger.info(f"Visual summary from {os.path.basename(video_path)}: {visual_summary}")
 
         # 3. COMBINE AUDIO AND VISUAL INFORMATION INTO TEXT
         combined_text = f"""Video Content Analysis:
@@ -230,7 +234,8 @@ Detailed Frame Descriptions:
             "num_frames_analyzed": len(frames),
             "transcript_length": len(transcript),
             "has_audio": len(transcript) > 0,
-            "has_visual": len(frames) > 0
+            "has_visual": len(frames) > 0,
+            "text":combined_text
         }
 
         # Clean up audio file
@@ -827,7 +832,7 @@ def get_document_qa_chain(filename: str = None, use_unified: bool = False):
     else:
         raise HTTPException(status_code=404, detail="Document or unified index not found")
 
-    llm = Ollama(
+    llm = ChatOllama(
         model=MODEL_NAME,
         temperature=0.1,
         top_p=0.9
@@ -854,7 +859,7 @@ def get_document_analysis(filename: str):
         sample_docs = retriever.get_relevant_documents("summary main topics content")
         sample_content = "\n".join([doc.page_content for doc in sample_docs[:5]])
 
-        llm = Ollama(model=MODEL_NAME, temperature=0.1)
+        llm = ChatOllama(model=MODEL_NAME, temperature=0.1)
 
         analysis_prompt = f"""Please analyze this document and provide a comprehensive summary:
 
@@ -868,6 +873,7 @@ Please provide:
 3. Main findings or conclusions
 4. Document structure and organization
 5. Important concepts or terminology used
+6. answer should be fully and only in arabic
 
 Analysis:"""
 
@@ -992,8 +998,8 @@ async def chat_with_document(request: ChatRequest):
     """Chat endpoint for document-specific Q&A"""
     try:
         logger.info(f"Chat request for document: {request.fileName}")
-        qa_chain = get_document_qa_chain(request.fileName, system_message="جاوب بالعربية (Answer in Arabic)")
-        result = qa_chain.invoke({"input": request.message})
+        qa_chain = get_document_qa_chain(request.fileName)
+        result = qa_chain.invoke({"query": request.message + " answer in arabic"})
 
         sources = []
         if 'context' in result:
@@ -1004,7 +1010,7 @@ async def chat_with_document(request: ChatRequest):
                 })
 
         return {
-            "response": result['answer'],
+            "response": result['result'],
             "fileName": request.fileName,
             "timestamp": request.timestamp,
             "status": "success"
@@ -1042,6 +1048,7 @@ Please provide:
 3. Main findings or conclusions
 4. Document structure and organization
 5. Important concepts or terminology used
+6. answer should be fully arabic unless told otherwise dont mix two languages
 
 Analysis:"""
 
@@ -1142,9 +1149,9 @@ async def ask_unified(request: QueryRequest):
         if request.language and request.language.lower() == "arabic":
             system_msg = "جاوب بالعربية (Answer in Arabic). You are a helpful assistant."
 
-        qa_chain = get_document_qa_chain(use_unified=True, system_message=system_msg)
+        qa_chain = get_document_qa_chain(use_unified=True)
 
-        result = qa_chain.invoke({"input": request.query})
+        result = qa_chain.invoke({"query": request.query})
 
         sources = []
         source_files = set()
